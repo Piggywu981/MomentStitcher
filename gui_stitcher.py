@@ -73,6 +73,9 @@ class GroupWidget(QWidget):
         """清空分组"""
         self.image_list.clear()
         self.images.clear()
+        # 更新主窗口的总图片数量显示
+        if hasattr(self.window(), 'update_total_images'):
+            self.window().update_total_images()
     
     def get_images(self):
         """获取分组中的图片"""
@@ -92,6 +95,9 @@ class GroupWidget(QWidget):
             if os.path.exists(image_path):
                 self.add_image(image_path)
         event.acceptProposedAction()
+        # 通知主窗口更新总图片数量
+        if hasattr(self.window(), 'update_total_images'):
+            self.window().update_total_images()
 
 class ImageStitcherThread(QThread):
     """后台处理线程"""
@@ -264,13 +270,19 @@ class ImageStitcherGUI(QMainWindow):
         self.group_size_spinbox = QSpinBox()
         self.group_size_spinbox.setRange(2, 20)
         self.group_size_spinbox.setValue(9)
-        self.group_size_spinbox.valueChanged.connect(self.auto_group_images)
+        self.group_size_spinbox.valueChanged.connect(self.on_group_size_changed)
         group_control_layout.addWidget(self.group_size_spinbox)
         
         self.auto_group_btn = QPushButton("自动分组")
-        self.auto_group_btn.clicked.connect(self.auto_group_images)
+        self.auto_group_btn.clicked.connect(lambda: self.auto_group_images())
         group_control_layout.addWidget(self.auto_group_btn)
         left_layout.addLayout(group_control_layout)
+        
+        # 图片数量显示
+        self.total_images_label = QLabel("共 0 张输出图片")
+        self.total_images_label.setAlignment(Qt.AlignCenter)
+        self.total_images_label.setStyleSheet("font-weight: bold; color: #0078d4;")
+        left_layout.addWidget(self.total_images_label)
         
         # 分组显示区域
         self.groups_widget = QWidget()
@@ -313,13 +325,6 @@ class ImageStitcherGUI(QMainWindow):
         self.output_btn = QPushButton("选择输出目录")
         self.output_btn.clicked.connect(self.select_output_dir)
         params_layout.addWidget(self.output_btn, 1, 2)
-        
-        # 每组图片数量
-        params_layout.addWidget(QLabel("每组图片数量:"), 2, 0)
-        self.images_spinbox = QSpinBox()
-        self.images_spinbox.setRange(1, 50)
-        self.images_spinbox.setValue(9)
-        params_layout.addWidget(self.images_spinbox, 2, 1)
         
         right_layout.addWidget(params_group)
         
@@ -430,6 +435,7 @@ class ImageStitcherGUI(QMainWindow):
         """加载图片到未分组池"""
         self.image_pool.clear()
         if not self.input_dir or not os.path.exists(self.input_dir):
+            self.update_total_images()
             return
             
         image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'}
@@ -459,22 +465,68 @@ class ImageStitcherGUI(QMainWindow):
             self.image_pool.addItem(item)
             
         self.image_pool.setIconSize(QSize(60, 60))
+        self.update_total_images()
         self.log_message(f"已加载 {len(images)} 张图片到未分组池")
 
-    def auto_group_images(self):
-        """根据设定的每组图片数量自动分组"""
-        # 清除现有分组
-        self.clear_all_groups()
+    def update_total_images(self):
+        """更新总图片数量显示（显示预期输出长图数量）"""
+        total_output_images = 0
         
-        # 获取所有未分组图片
+        # 计算分组中的输出图片数量（每个有效分组输出1张长图）
+        for i in range(self.groups_layout.count()):
+            widget = self.groups_layout.itemAt(i).widget()
+            if isinstance(widget, GroupWidget):
+                total_output_images += 1
+        
+        self.total_images_label.setText(f"共 {total_output_images} 张输出图片")
+
+    def on_group_size_changed(self, new_value):
+        """处理分组大小变化"""
+        self.auto_group_images()
+
+    def auto_group_images(self):
+        """根据设定的每组图片数量自动分组（会将所有图片重新放回未分组池再重新分组）"""
+        # 收集所有图片（包括已分组的和未分组的）
         all_images = []
+        
+        # 收集未分组池中的图片
         for i in range(self.image_pool.count()):
             item = self.image_pool.item(i)
             all_images.append(item.data(Qt.UserRole))
         
+        # 收集所有分组中的图片
+        for i in range(self.groups_layout.count()):
+            group_widget = self.groups_layout.itemAt(i).widget()
+            if isinstance(group_widget, GroupWidget):
+                group_images = group_widget.get_images()
+                all_images.extend(group_images)
+        
+        # 清空现有分组和未分组池
+        self.clear_all_groups()
+        self.image_pool.clear()
+        
         if not all_images:
+            self.update_total_images()
             return
         
+        # 将所有图片重新放入未分组池
+        for img_path in all_images:
+            item = QListWidgetItem()
+            item.setText(os.path.basename(img_path))
+            item.setData(Qt.UserRole, img_path)
+            
+            # 添加缩略图
+            try:
+                pixmap = QPixmap(img_path)
+                if not pixmap.isNull():
+                    scaled = pixmap.scaled(60, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    item.setIcon(QIcon(scaled))
+            except Exception:
+                pass
+                
+            self.image_pool.addItem(item)
+        
+        # 重新进行自动分组
         group_size = self.group_size_spinbox.value()
         total_groups = (len(all_images) + group_size - 1) // group_size
         
@@ -490,9 +542,14 @@ class ImageStitcherGUI(QMainWindow):
             
             self.groups_layout.addWidget(group_widget)
         
-        # 清空未分组池
-        self.image_pool.clear()
-        self.log_message(f"已自动创建 {total_groups} 个分组")
+        # 从未分组池中移除已分组的图片
+        for i in range(self.image_pool.count() - 1, -1, -1):
+            item = self.image_pool.item(i)
+            if item and item.data(Qt.UserRole) in all_images[:total_groups * group_size]:
+                self.image_pool.takeItem(i)
+        
+        self.update_total_images()
+        self.log_message(f"已将 {len(all_images)} 张图片重新分组，共创建 {total_groups} 个分组")
         self.check_start_button()
 
     def clear_all_groups(self):
@@ -501,6 +558,8 @@ class ImageStitcherGUI(QMainWindow):
             child = self.groups_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
+        self.update_total_images()
+        self.check_start_button()
 
     def get_all_groups(self):
         """获取所有分组信息"""
@@ -638,19 +697,26 @@ class ImageStitcherGUI(QMainWindow):
             return
         
         reply = QMessageBox.question(self, "确认", 
-                                     f"确定要清空输出目录 {self.output_dir} 吗？",
+                                     f"确定要清空输出目录 {self.output_dir} 吗？\n(将保留 .gitkeep 文件)",
                                      QMessageBox.Yes | QMessageBox.No)
         
         if reply == QMessageBox.Yes:
             import shutil
             try:
+                deleted_count = 0
                 for item in os.listdir(self.output_dir):
+                    if item == '.gitkeep':
+                        continue  # 跳过.gitkeep文件
+                    
                     item_path = os.path.join(self.output_dir, item)
                     if os.path.isfile(item_path):
                         os.unlink(item_path)
+                        deleted_count += 1
                     elif os.path.isdir(item_path):
                         shutil.rmtree(item_path)
-                QMessageBox.information(self, "完成", "输出目录已清空")
+                        deleted_count += 1
+                
+                QMessageBox.information(self, "完成", f"输出目录已清空，共删除 {deleted_count} 个项目")
             except Exception as e:
                 QMessageBox.warning(self, "错误", f"清空失败: {str(e)}")
 

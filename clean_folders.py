@@ -21,22 +21,20 @@ def clear_folder(folder_path, folder_name):
         print(f"{folder_name} ({folder_path}) 不是有效的文件夹")
         return False
     
-    # 获取文件夹内的所有文件
-    files = list(folder.iterdir())
+    # 获取文件夹内的所有文件（排除.gitkeep）
+    files = [f for f in folder.iterdir() if f.is_file() and f.name != '.gitkeep']
     
     if not files:
-        print(f"文件夹 {folder_name} ({folder_path}) 已经是空的")
+        print(f"文件夹 {folder_name} ({folder_path}) 已经是空的（或只包含.gitkeep）")
         return True
     
     print(f"文件夹 {folder_name} ({folder_path}) 包含以下文件：")
-    file_count = 0
+    file_count = len(files)
     for file in files:
-        if file.is_file():
-            print(f"  - {file.name}")
-            file_count += 1
+        print(f"  - {file.name}")
     
     if file_count == 0:
-        print("文件夹内没有文件")
+        print("文件夹内没有需要删除的文件")
         return True
     
     # 确认删除
@@ -45,7 +43,7 @@ def clear_folder(folder_path, folder_name):
     if confirm in ('y', 'yes'):
         deleted_count = 0
         for file in files:
-            if file.is_file():
+            if file.is_file() and file.name != '.gitkeep':
                 try:
                     file.unlink()
                     deleted_count += 1
