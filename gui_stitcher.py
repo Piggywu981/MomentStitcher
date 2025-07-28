@@ -237,7 +237,7 @@ class ImageStitcherGUI(QMainWindow):
         
     def init_ui(self):
         """初始化界面"""
-        self.setWindowTitle('朋友圈拼图工具')
+        self.setWindowTitle('MomentStitcher - 朋友圈长图拼接工具')
         self.setGeometry(100, 100, 1000, 700)
         
         # 中心部件
@@ -249,7 +249,7 @@ class ImageStitcherGUI(QMainWindow):
         central_widget.setLayout(main_layout)
         
         # 标题
-        title = QLabel('朋友圈拼图工具')
+        title = QLabel('MomentStitcher - 朋友圈长图拼接工具')
         title_font = QFont()
         title_font.setPointSize(18)
         title_font.setBold(True)
