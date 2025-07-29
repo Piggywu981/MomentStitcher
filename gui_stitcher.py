@@ -5,6 +5,8 @@
 将多张图片垂直拼接成长图的可视化工具
 """
 
+__version__ = "2.2.0"
+
 import sys
 import os
 from pathlib import Path
@@ -12,7 +14,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QFileDialog, 
                              QSpinBox, QProgressBar, QTextEdit, QMessageBox,
                              QGroupBox, QGridLayout, QListWidget, QListWidgetItem, 
-                             QAbstractItemView, QSplitter)
+                             QAbstractItemView, QSplitter, QSizePolicy)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QDir, QSize
 from PyQt5.QtGui import QPixmap, QDragEnterEvent, QDropEvent, QFont, QIcon
 from PIL import Image
@@ -30,25 +32,50 @@ class GroupWidget(QWidget):
     def init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(5)
         
         # 分组标题
         title_label = QLabel(self.group_name)
         title_label.setAlignment(Qt.AlignCenter)
         title_label.setStyleSheet("font-weight: bold; background-color: #e0e0e0; padding: 5px;")
+        title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         layout.addWidget(title_label)
         
-        # 图片列表
+        # 排序按钮区域 - 使用水平布局并设置伸缩
+        sort_layout = QHBoxLayout()
+        sort_layout.setSpacing(2)
+        
+        self.sort_name_btn = QPushButton("按名称")
+        self.sort_name_btn.clicked.connect(lambda: self.sort_images('name'))
+        self.sort_name_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        sort_layout.addWidget(self.sort_name_btn)
+        
+        self.sort_size_btn = QPushButton("按大小")
+        self.sort_size_btn.clicked.connect(lambda: self.sort_images('size'))
+        self.sort_size_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        sort_layout.addWidget(self.sort_size_btn)
+        
+        self.sort_time_btn = QPushButton("按时间")
+        self.sort_time_btn.clicked.connect(lambda: self.sort_images('time'))
+        self.sort_time_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        sort_layout.addWidget(self.sort_time_btn)
+        
+        layout.addLayout(sort_layout)
+        
+        # 图片列表 - 设置为可伸缩
         self.image_list = QListWidget()
         self.image_list.setIconSize(QSize(50, 50))
         self.image_list.setStyleSheet("QListWidget::item { height: 60px; }")
         self.image_list.setDragEnabled(True)
         self.image_list.setAcceptDrops(True)
         self.image_list.setDefaultDropAction(Qt.MoveAction)
+        self.image_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout.addWidget(self.image_list)
         
         # 删除按钮
         self.remove_btn = QPushButton("清空分组")
         self.remove_btn.clicked.connect(self.clear_group)
+        self.remove_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         layout.addWidget(self.remove_btn)
     
     def add_image(self, image_path):
@@ -79,7 +106,77 @@ class GroupWidget(QWidget):
     
     def get_images(self):
         """获取分组中的图片"""
-        return self.images
+        # 确保返回当前实际的图片列表
+        current_images = []
+        for i in range(self.image_list.count()):
+            item = self.image_list.item(i)
+            if item:
+                current_images.append(item.data(Qt.UserRole))
+        self.images = current_images  # 同步缓存
+        return current_images
+    
+    def sort_images(self, sort_by='name'):
+        """组内排序功能
+        
+        Args:
+            sort_by: 排序方式 'name', 'size', 'time'
+        """
+        if not self.images:
+            return
+            
+        try:
+            # 获取当前实际在列表中的图片（而不是缓存的self.images）
+            current_images = []
+            for i in range(self.image_list.count()):
+                item = self.image_list.item(i)
+                if item:
+                    current_images.append(item.data(Qt.UserRole))
+            
+            if not current_images:
+                return
+                
+            # 获取图片信息列表
+            image_info = []
+            for img_path in current_images:
+                try:
+                    stat = os.stat(img_path)
+                    info = {
+                        'path': img_path,
+                        'name': os.path.basename(img_path),
+                        'size': stat.st_size,
+                        'mtime': stat.st_mtime
+                    }
+                    image_info.append(info)
+                except (OSError, IOError):
+                    # 如果文件信息获取失败，使用基础信息
+                    image_info.append({
+                        'path': img_path,
+                        'name': os.path.basename(img_path),
+                        'size': 0,
+                        'mtime': 0
+                    })
+            
+            # 根据排序方式进行排序
+            if sort_by == 'name':
+                image_info.sort(key=lambda x: x['name'].lower())
+            elif sort_by == 'size':
+                image_info.sort(key=lambda x: x['size'], reverse=True)
+            elif sort_by == 'time':
+                image_info.sort(key=lambda x: x['mtime'], reverse=True)
+            
+            # 清空当前列表并重新添加排序后的图片
+            self.image_list.clear()
+            self.images.clear()
+            
+            for info in image_info:
+                self.add_image(info['path'])
+                
+            # 通知主窗口更新
+            if hasattr(self.window(), 'update_total_images'):
+                self.window().update_total_images()
+                
+        except Exception as e:
+            print(f"排序失败: {e}")
     
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls() or event.mimeData().hasText():
@@ -240,30 +337,39 @@ class ImageStitcherGUI(QMainWindow):
         self.setWindowTitle('MomentStitcher - 朋友圈长图拼接工具')
         self.setGeometry(100, 100, 1000, 700)
         
+        # 设置最小窗口尺寸
+        self.setMinimumSize(800, 600)
+        
         # 中心部件
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
         # 主布局
         main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(10, 10, 10, 10)
         central_widget.setLayout(main_layout)
         
-        # 标题
+        # 标题 - 设置伸缩性
         title = QLabel('MomentStitcher - 朋友圈长图拼接工具')
         title_font = QFont()
         title_font.setPointSize(18)
         title_font.setBold(True)
         title.setFont(title_font)
         title.setAlignment(Qt.AlignCenter)
+        title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         main_layout.addWidget(title)
         
-        # 创建分割器
+        # 创建分割器 - 设置伸缩比例
         splitter = QSplitter(Qt.Horizontal)
+        splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         
         # 左侧分组管理区域
         left_widget = QWidget()
+        left_widget.setMinimumWidth(400)
+        left_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         left_layout = QVBoxLayout(left_widget)
-        
+        left_layout.setContentsMargins(10, 10, 10, 10)
+
         # 分组控制
         group_control_layout = QHBoxLayout()
         group_control_layout.addWidget(QLabel("每组图片数量:"))
@@ -272,57 +378,80 @@ class ImageStitcherGUI(QMainWindow):
         self.group_size_spinbox.setValue(9)
         self.group_size_spinbox.valueChanged.connect(self.on_group_size_changed)
         group_control_layout.addWidget(self.group_size_spinbox)
-        
+
         self.auto_group_btn = QPushButton("自动分组")
         self.auto_group_btn.clicked.connect(lambda: self.auto_group_images())
         group_control_layout.addWidget(self.auto_group_btn)
         left_layout.addLayout(group_control_layout)
-        
+
         # 图片数量显示
         self.total_images_label = QLabel("共 0 张输出图片")
         self.total_images_label.setAlignment(Qt.AlignCenter)
         self.total_images_label.setStyleSheet("font-weight: bold; color: #0078d4;")
+        self.total_images_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         left_layout.addWidget(self.total_images_label)
-        
+
         # 分组显示区域
-        self.groups_widget = QWidget()
-        self.groups_layout = QVBoxLayout(self.groups_widget)
-        left_layout.addWidget(QLabel("图片分组:"))
-        left_layout.addWidget(self.groups_widget)
-        
+        groups_label = QLabel("图片分组:")
+        groups_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        left_layout.addWidget(groups_label)
+
+        # 创建分组网格布局容器
+        self.groups_scroll = QWidget()
+        self.groups_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.groups_layout = QGridLayout(self.groups_scroll)
+        self.groups_layout.setContentsMargins(0, 0, 0, 0)
+        self.groups_layout.setSpacing(10)
+        left_layout.addWidget(self.groups_scroll)
+
         # 图片池（未分组图片）
+        pool_label = QLabel("未分组图片:")
+        pool_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        left_layout.addWidget(pool_label)
         self.image_pool = QListWidget()
         self.image_pool.setIconSize(QSize(60, 60))
         self.image_pool.setStyleSheet("QListWidget::item { height: 70px; }")
         self.image_pool.setDragEnabled(True)
         self.image_pool.setDefaultDropAction(Qt.MoveAction)
-        left_layout.addWidget(QLabel("未分组图片:"))
+        self.image_pool.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.image_pool.setFixedHeight(150)
         left_layout.addWidget(self.image_pool)
         
         splitter.addWidget(left_widget)
         
         # 右侧参数设置和处理区域
         right_widget = QWidget()
+        right_widget.setMinimumWidth(350)
+        right_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(5, 5, 5, 5)
         
         # 参数设置区域
         params_group = QGroupBox("参数设置")
+        params_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         params_layout = QGridLayout()
+        params_layout.setContentsMargins(10, 10, 10, 10)
         params_group.setLayout(params_layout)
         
         # 输入目录
         params_layout.addWidget(QLabel("输入目录:"), 0, 0)
         self.input_label = QLabel("未选择")
+        self.input_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.input_label.setMinimumWidth(150)
         params_layout.addWidget(self.input_label, 0, 1)
         self.input_btn = QPushButton("选择输入目录")
+        self.input_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.input_btn.clicked.connect(self.select_input_dir)
         params_layout.addWidget(self.input_btn, 0, 2)
         
         # 输出目录
         params_layout.addWidget(QLabel("输出目录:"), 1, 0)
         self.output_label = QLabel("未选择")
+        self.output_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.output_label.setMinimumWidth(150)
         params_layout.addWidget(self.output_label, 1, 1)
         self.output_btn = QPushButton("选择输出目录")
+        self.output_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.output_btn.clicked.connect(self.select_output_dir)
         params_layout.addWidget(self.output_btn, 1, 2)
         
@@ -330,43 +459,53 @@ class ImageStitcherGUI(QMainWindow):
         
         # 拖拽区域
         self.drop_label = DragDropLabel("拖拽图片或文件夹到此处\n支持批量处理")
+        self.drop_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.drop_label.setMinimumHeight(80)
+        self.drop_label.setMaximumHeight(120)
         self.drop_label.files_dropped.connect(self.handle_dropped_files)
         right_layout.addWidget(self.drop_label)
         
         # 日志区域
         log_group = QGroupBox("处理日志")
+        log_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         log_layout = QVBoxLayout()
+        log_layout.setContentsMargins(10, 10, 10, 10)
         log_group.setLayout(log_layout)
         
         self.log_text = QTextEdit()
-        self.log_text.setMaximumHeight(150)
+        self.log_text.setFixedHeight(150)
+        self.log_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         log_layout.addWidget(self.log_text)
         
         right_layout.addWidget(log_group)
         
         # 进度条
         self.progress_bar = QProgressBar()
+        self.progress_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.progress_bar.setVisible(False)
         right_layout.addWidget(self.progress_bar)
         
         # 按钮区域
         button_layout = QHBoxLayout()
+        button_layout.setSpacing(5)
         
         self.start_btn = QPushButton("开始拼图")
+        self.start_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.start_btn.clicked.connect(self.start_stitching_from_groups)
         self.start_btn.setEnabled(False)
         
         self.stop_btn = QPushButton("停止")
+        self.stop_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.stop_btn.clicked.connect(self.stop_stitching)
         self.stop_btn.setEnabled(False)
         
         self.clear_btn = QPushButton("清空输出目录")
+        self.clear_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.clear_btn.clicked.connect(self.clear_output_dir)
         
         button_layout.addWidget(self.start_btn)
         button_layout.addWidget(self.stop_btn)
         button_layout.addWidget(self.clear_btn)
-        button_layout.addStretch()
         
         right_layout.addLayout(button_layout)
         
@@ -376,6 +515,14 @@ class ImageStitcherGUI(QMainWindow):
         
         # 设置默认目录
         self.set_default_dirs()
+        
+        # 设置分割器比例
+        splitter.setStretchFactor(0, 6)  # 左侧占60%
+        splitter.setStretchFactor(1, 4)  # 右侧占40%
+        
+        # 设置分割器可调整
+        splitter.setHandleWidth(5)
+        splitter.setChildrenCollapsible(False)
     
     def set_default_dirs(self):
         """设置默认目录"""
@@ -474,9 +621,11 @@ class ImageStitcherGUI(QMainWindow):
         
         # 计算分组中的输出图片数量（每个有效分组输出1张长图）
         for i in range(self.groups_layout.count()):
-            widget = self.groups_layout.itemAt(i).widget()
-            if isinstance(widget, GroupWidget):
-                total_output_images += 1
+            item = self.groups_layout.itemAt(i)
+            if item and isinstance(item.widget(), GroupWidget):
+                widget = item.widget()
+                if widget.get_images():
+                    total_output_images += 1
         
         self.total_images_label.setText(f"共 {total_output_images} 张输出图片")
 
@@ -530,6 +679,9 @@ class ImageStitcherGUI(QMainWindow):
         group_size = self.group_size_spinbox.value()
         total_groups = (len(all_images) + group_size - 1) // group_size
         
+        # 计算最佳列数
+        cols = max(2, min(4, (total_groups + 1) // 2))
+        
         # 创建分组
         for i in range(total_groups):
             start_idx = i * group_size
@@ -540,7 +692,9 @@ class ImageStitcherGUI(QMainWindow):
             for img_path in group_images:
                 group_widget.add_image(img_path)
             
-            self.groups_layout.addWidget(group_widget)
+            row = i // cols
+            col = i % cols
+            self.groups_layout.addWidget(group_widget, row, col)
         
         # 从未分组池中移除已分组的图片
         for i in range(self.image_pool.count() - 1, -1, -1):
@@ -558,6 +712,21 @@ class ImageStitcherGUI(QMainWindow):
             child = self.groups_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
+        self.update_total_images()
+        self.check_start_button()
+
+    def add_empty_group(self):
+        """添加空分组"""
+        group_name = f"分组 {self.groups_layout.count() + 1}"
+        group_widget = GroupWidget(group_name)
+        
+        # 计算网格位置
+        count = self.groups_layout.count()
+        cols = max(2, min(4, (count + 1) // 2 + 1))  # 根据分组数量动态调整列数
+        row = count // cols
+        col = count % cols
+        
+        self.groups_layout.addWidget(group_widget, row, col)
         self.update_total_images()
         self.check_start_button()
 
@@ -724,7 +893,9 @@ def main():
     """主函数"""
     app = QApplication(sys.argv)
     
-    # 设置应用样式
+    # 设置应用信息
+    app.setApplicationName("MomentStitcher")
+    app.setApplicationVersion(__version__)
     app.setStyle('Fusion')
     
     window = ImageStitcherGUI()
