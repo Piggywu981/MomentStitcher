@@ -5,7 +5,7 @@
 将多张图片垂直拼接成长图的可视化工具
 """
 
-__version__ = "2.2.0"
+__version__ = "2.2.1"
 
 import sys
 import os
@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QFileDialog, 
                              QSpinBox, QProgressBar, QTextEdit, QMessageBox,
                              QGroupBox, QGridLayout, QListWidget, QListWidgetItem, 
-                             QAbstractItemView, QSplitter, QSizePolicy)
+                             QAbstractItemView, QSplitter, QSizePolicy, QProgressDialog)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QDir, QSize
 from PyQt5.QtGui import QPixmap, QDragEnterEvent, QDropEvent, QFont, QIcon
 from PIL import Image
@@ -116,7 +116,7 @@ class GroupWidget(QWidget):
         return current_images
     
     def sort_images(self, sort_by='name'):
-        """组内排序功能
+        """组内排序功能（带进度条）
         
         Args:
             sort_by: 排序方式 'name', 'size', 'time'
@@ -124,8 +124,16 @@ class GroupWidget(QWidget):
         if not self.images:
             return
             
+        # 创建进度对话框
+        parent = self.window()
+        progress = QProgressDialog("正在排序组内图片...", "取消", 0, 100, parent)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setAutoClose(True)
+        progress.setValue(0)
+        progress.show()
+        
         try:
-            # 获取当前实际在列表中的图片（而不是缓存的self.images）
+            # 获取当前实际在列表中的图片
             current_images = []
             for i in range(self.image_list.count()):
                 item = self.image_list.item(i)
@@ -133,11 +141,19 @@ class GroupWidget(QWidget):
                     current_images.append(item.data(Qt.UserRole))
             
             if not current_images:
+                progress.close()
                 return
                 
+            total_images = len(current_images)
+            progress.setMaximum(total_images)
+            
             # 获取图片信息列表
             image_info = []
-            for img_path in current_images:
+            for idx, img_path in enumerate(current_images):
+                if progress.wasCanceled():
+                    progress.close()
+                    return
+                    
                 try:
                     stat = os.stat(img_path)
                     info = {
@@ -148,13 +164,15 @@ class GroupWidget(QWidget):
                     }
                     image_info.append(info)
                 except (OSError, IOError):
-                    # 如果文件信息获取失败，使用基础信息
                     image_info.append({
                         'path': img_path,
                         'name': os.path.basename(img_path),
                         'size': 0,
                         'mtime': 0
                     })
+                
+                progress.setValue(idx + 1)
+                QApplication.processEvents()
             
             # 根据排序方式进行排序
             if sort_by == 'name':
@@ -168,14 +186,23 @@ class GroupWidget(QWidget):
             self.image_list.clear()
             self.images.clear()
             
-            for info in image_info:
+            for idx, info in enumerate(image_info):
+                if progress.wasCanceled():
+                    progress.close()
+                    return
+                    
                 self.add_image(info['path'])
+                progress.setValue(idx + 1)
+                QApplication.processEvents()
                 
+            progress.close()
+            
             # 通知主窗口更新
             if hasattr(self.window(), 'update_total_images'):
                 self.window().update_total_images()
                 
         except Exception as e:
+            progress.close()
             print(f"排序失败: {e}")
     
     def dragEnterEvent(self, event):
@@ -208,7 +235,7 @@ class ImageStitcherThread(QThread):
         self.image_groups = image_groups  # 现在是分组后的图片列表
         
     def run(self):
-        """后台执行拼图操作"""
+        """后台执行拼图操作（带详细进度）"""
         try:
             self.log_message.emit("开始处理图片...")
             self.output_dir.mkdir(exist_ok=True)
@@ -218,17 +245,28 @@ class ImageStitcherThread(QThread):
                 self.finished_signal.emit(False, "没有分组图片")
                 return
             
+            # 计算总处理步骤数
+            total_steps = 0
+            for group_images in self.image_groups:
+                if len(group_images) >= 2:
+                    total_steps += len(group_images) + 3  # 加载+缩放+创建+保存
+            
+            current_step = 0
+            
             for group_num, group_images in enumerate(self.image_groups):
                 if len(group_images) < 2:
                     self.log_message.emit(f"第{group_num+1}组图片数量不足，跳过")
                     continue
                 
+                self.log_message.emit(f"开始处理第{group_num+1}组图片（共{len(group_images)}张）...")
+                
                 # 加载并处理图片
                 pil_images = []
                 min_width = float('inf')
                 
-                for img_path in group_images:
+                for idx, img_path in enumerate(group_images):
                     try:
+                        self.log_message.emit(f"  加载图片: {Path(img_path).name}")
                         img = Image.open(img_path)
                         if img.mode in ('RGBA', 'LA'):
                             background = Image.new('RGB', img.size, (255, 255, 255))
@@ -241,13 +279,18 @@ class ImageStitcherThread(QThread):
                         min_width = min(min_width, img.width)
                         
                     except Exception as e:
-                        self.log_message.emit(f"处理图片 {Path(img_path).name} 时出错: {e}")
+                        self.log_message.emit(f"  处理图片 {Path(img_path).name} 时出错: {e}")
                         continue
+                    
+                    current_step += 1
+                    progress = int(current_step / total_steps * 100)
+                    self.progress_updated.emit(progress)
                 
                 if not pil_images:
                     continue
                 
                 # 缩放图片
+                self.log_message.emit("  正在缩放图片...")
                 resized_images = []
                 total_height = 0
                 
@@ -258,14 +301,23 @@ class ImageStitcherThread(QThread):
                     resized_img = img.resize((min_width, new_height), Image.Resampling.LANCZOS)
                     resized_images.append(resized_img)
                     total_height += new_height
+                    
+                    current_step += 1
+                    progress = int(current_step / total_steps * 100)
+                    self.progress_updated.emit(progress)
                 
                 # 创建长图
+                self.log_message.emit("  正在拼接图片...")
                 final_img = Image.new('RGB', (min_width, total_height), (255, 255, 255))
                 
                 y_offset = 0
                 for img in resized_images:
                     final_img.paste(img, (0, y_offset))
                     y_offset += img.height
+                
+                current_step += 1
+                progress = int(current_step / total_steps * 100)
+                self.progress_updated.emit(progress)
                 
                 # 保存结果
                 if total_groups == 1:
@@ -274,10 +326,13 @@ class ImageStitcherThread(QThread):
                     output_name = f"stitched_long_image_part{group_num + 1}.jpg"
                 
                 output_path = self.output_dir / output_name
+                self.log_message.emit(f"  保存图片: {output_name}")
                 final_img.save(output_path, 'JPEG', quality=95)
                 
-                progress = int((group_num + 1) / total_groups * 100)
+                current_step += 1
+                progress = int(current_step / total_steps * 100)
                 self.progress_updated.emit(progress)
+                
                 self.log_message.emit(f"已生成: {output_name} ({len(resized_images)}张图片)")
             
             self.finished_signal.emit(True, f"处理完成！共生成 {total_groups} 张长图")
@@ -408,6 +463,28 @@ class ImageStitcherGUI(QMainWindow):
         pool_label = QLabel("未分组图片:")
         pool_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         left_layout.addWidget(pool_label)
+        
+        # 未分组图片排序按钮
+        pool_sort_layout = QHBoxLayout()
+        pool_sort_layout.setSpacing(2)
+        
+        self.pool_sort_name_btn = QPushButton("按名称")
+        self.pool_sort_name_btn.clicked.connect(lambda: self.sort_unassigned_images('name'))
+        self.pool_sort_name_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        pool_sort_layout.addWidget(self.pool_sort_name_btn)
+        
+        self.pool_sort_size_btn = QPushButton("按大小")
+        self.pool_sort_size_btn.clicked.connect(lambda: self.sort_unassigned_images('size'))
+        self.pool_sort_size_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        pool_sort_layout.addWidget(self.pool_sort_size_btn)
+        
+        self.pool_sort_time_btn = QPushButton("按时间")
+        self.pool_sort_time_btn.clicked.connect(lambda: self.sort_unassigned_images('time'))
+        self.pool_sort_time_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        pool_sort_layout.addWidget(self.pool_sort_time_btn)
+        
+        left_layout.addLayout(pool_sort_layout)
+        
         self.image_pool = QListWidget()
         self.image_pool.setIconSize(QSize(60, 60))
         self.image_pool.setStyleSheet("QListWidget::item { height: 70px; }")
@@ -633,78 +710,201 @@ class ImageStitcherGUI(QMainWindow):
         """处理分组大小变化"""
         self.auto_group_images()
 
-    def auto_group_images(self):
-        """根据设定的每组图片数量自动分组（会将所有图片重新放回未分组池再重新分组）"""
-        # 收集所有图片（包括已分组的和未分组的）
-        all_images = []
+    def sort_unassigned_images(self, sort_by='name'):
+        """对未分组图片进行排序（带进度条）
         
-        # 收集未分组池中的图片
-        for i in range(self.image_pool.count()):
-            item = self.image_pool.item(i)
-            all_images.append(item.data(Qt.UserRole))
-        
-        # 收集所有分组中的图片
-        for i in range(self.groups_layout.count()):
-            group_widget = self.groups_layout.itemAt(i).widget()
-            if isinstance(group_widget, GroupWidget):
-                group_images = group_widget.get_images()
-                all_images.extend(group_images)
-        
-        # 清空现有分组和未分组池
-        self.clear_all_groups()
-        self.image_pool.clear()
-        
-        if not all_images:
-            self.update_total_images()
+        Args:
+            sort_by: 排序方式 'name', 'size', 'time'
+        """
+        if self.image_pool.count() == 0:
             return
-        
-        # 将所有图片重新放入未分组池
-        for img_path in all_images:
-            item = QListWidgetItem()
-            item.setText(os.path.basename(img_path))
-            item.setData(Qt.UserRole, img_path)
             
-            # 添加缩略图
-            try:
-                pixmap = QPixmap(img_path)
-                if not pixmap.isNull():
-                    scaled = pixmap.scaled(60, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                    item.setIcon(QIcon(scaled))
-            except Exception:
-                pass
+        # 创建进度对话框
+        progress = QProgressDialog("正在排序图片...", "取消", 0, 100, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setAutoClose(True)
+        progress.setValue(0)
+        progress.show()
+        
+        try:
+            # 获取所有未分组图片路径
+            image_paths = []
+            for i in range(self.image_pool.count()):
+                item = self.image_pool.item(i)
+                if item:
+                    img_path = item.data(Qt.UserRole)
+                    image_paths.append(img_path)
+            
+            if not image_paths:
+                progress.close()
+                return
                 
-            self.image_pool.addItem(item)
-        
-        # 重新进行自动分组
-        group_size = self.group_size_spinbox.value()
-        total_groups = (len(all_images) + group_size - 1) // group_size
-        
-        # 计算最佳列数
-        cols = max(2, min(4, (total_groups + 1) // 2))
-        
-        # 创建分组
-        for i in range(total_groups):
-            start_idx = i * group_size
-            end_idx = min(start_idx + group_size, len(all_images))
-            group_images = all_images[start_idx:end_idx]
+            total_images = len(image_paths)
+            progress.setMaximum(total_images)
             
-            group_widget = GroupWidget(f"分组 {i+1}")
-            for img_path in group_images:
-                group_widget.add_image(img_path)
+            # 获取图片信息并排序
+            image_info = []
+            for idx, img_path in enumerate(image_paths):
+                if progress.wasCanceled():
+                    progress.close()
+                    return
+                    
+                try:
+                    stat = os.stat(img_path)
+                    info = {
+                        'path': img_path,
+                        'name': os.path.basename(img_path),
+                        'size': stat.st_size,
+                        'mtime': stat.st_mtime
+                    }
+                    image_info.append(info)
+                except (OSError, IOError):
+                    image_info.append({
+                        'path': img_path,
+                        'name': os.path.basename(img_path),
+                        'size': 0,
+                        'mtime': 0
+                    })
+                
+                progress.setValue(idx + 1)
+                QApplication.processEvents()
             
-            row = i // cols
-            col = i % cols
-            self.groups_layout.addWidget(group_widget, row, col)
+            # 根据排序方式进行排序
+            if sort_by == 'name':
+                image_info.sort(key=lambda x: x['name'].lower())
+            elif sort_by == 'size':
+                image_info.sort(key=lambda x: x['size'], reverse=True)
+            elif sort_by == 'time':
+                image_info.sort(key=lambda x: x['mtime'], reverse=True)
+            
+            # 清空并重新创建项目
+            self.image_pool.clear()
+            for info in image_info:
+                item = QListWidgetItem()
+                item.setText(info['name'])
+                item.setData(Qt.UserRole, info['path'])
+                
+                # 添加缩略图
+                try:
+                    pixmap = QPixmap(info['path'])
+                    if not pixmap.isNull():
+                        scaled = pixmap.scaled(60, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        item.setIcon(QIcon(scaled))
+                except Exception:
+                    pass
+                    
+                self.image_pool.addItem(item)
+            
+            progress.close()
+            self.log_message(f"未分组图片已按{sort_by}排序")
+            
+        except Exception as e:
+            progress.close()
+            self.log_message(f"排序失败: {e}")
+
+    def auto_group_images(self):
+        """根据设定的每组图片数量自动分组（带进度条）"""
+        # 创建进度对话框
+        progress = QProgressDialog("正在重新分组图片...", "取消", 0, 100, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setAutoClose(True)
+        progress.setValue(0)
+        progress.show()
         
-        # 从未分组池中移除已分组的图片
-        for i in range(self.image_pool.count() - 1, -1, -1):
-            item = self.image_pool.item(i)
-            if item and item.data(Qt.UserRole) in all_images[:total_groups * group_size]:
-                self.image_pool.takeItem(i)
-        
-        self.update_total_images()
-        self.log_message(f"已将 {len(all_images)} 张图片重新分组，共创建 {total_groups} 个分组")
-        self.check_start_button()
+        try:
+            # 收集所有图片（包括已分组的和未分组的）
+            all_images = []
+            
+            # 收集未分组池中的图片
+            for i in range(self.image_pool.count()):
+                item = self.image_pool.item(i)
+                all_images.append(item.data(Qt.UserRole))
+            
+            # 收集所有分组中的图片
+            for i in range(self.groups_layout.count()):
+                group_widget = self.groups_layout.itemAt(i).widget()
+                if isinstance(group_widget, GroupWidget):
+                    group_images = group_widget.get_images()
+                    all_images.extend(group_images)
+            
+            # 清空现有分组和未分组池
+            self.clear_all_groups()
+            self.image_pool.clear()
+            
+            if not all_images:
+                progress.close()
+                self.update_total_images()
+                return
+            
+            total_images = len(all_images)
+            progress.setMaximum(total_images)
+            
+            # 将所有图片重新放入未分组池
+            for idx, img_path in enumerate(all_images):
+                if progress.wasCanceled():
+                    progress.close()
+                    return
+                    
+                item = QListWidgetItem()
+                item.setText(os.path.basename(img_path))
+                item.setData(Qt.UserRole, img_path)
+                
+                # 添加缩略图
+                try:
+                    pixmap = QPixmap(img_path)
+                    if not pixmap.isNull():
+                        scaled = pixmap.scaled(60, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        item.setIcon(QIcon(scaled))
+                except Exception:
+                    pass
+                    
+                self.image_pool.addItem(item)
+                progress.setValue(idx + 1)
+                QApplication.processEvents()
+            
+            # 重新进行自动分组
+            group_size = self.group_size_spinbox.value()
+            total_groups = (total_images + group_size - 1) // group_size
+            
+            # 计算最佳列数
+            cols = max(2, min(4, (total_groups + 1) // 2))
+            
+            # 创建分组
+            for i in range(total_groups):
+                if progress.wasCanceled():
+                    progress.close()
+                    return
+                    
+                start_idx = i * group_size
+                end_idx = min(start_idx + group_size, total_images)
+                group_images = all_images[start_idx:end_idx]
+                
+                group_widget = GroupWidget(f"分组 {i+1}")
+                for img_path in group_images:
+                    group_widget.add_image(img_path)
+                
+                row = i // cols
+                col = i % cols
+                self.groups_layout.addWidget(group_widget, row, col)
+                
+                # 更新进度
+                progress.setValue(int((i + 1) / total_groups * total_images))
+                QApplication.processEvents()
+            
+            # 从未分组池中移除已分组的图片
+            for i in range(self.image_pool.count() - 1, -1, -1):
+                item = self.image_pool.item(i)
+                if item and item.data(Qt.UserRole) in all_images[:total_groups * group_size]:
+                    self.image_pool.takeItem(i)
+            
+            progress.close()
+            self.update_total_images()
+            self.log_message(f"已将 {total_images} 张图片重新分组，共创建 {total_groups} 个分组")
+            self.check_start_button()
+            
+        except Exception as e:
+            progress.close()
+            self.log_message(f"分组失败: {e}")
 
     def clear_all_groups(self):
         """清空所有分组"""
